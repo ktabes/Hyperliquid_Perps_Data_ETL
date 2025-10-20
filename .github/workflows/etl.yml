@@ -1,0 +1,32 @@
+name: HL Perps → Dune
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "15 * * * *"   # every hour at :15 (tweak as you like)
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip requests
+
+      - name: Run ETL
+        env:
+          DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+          DUNE_TABLE_NAME: hl_perps_daily
+          ROLLING_DAYS: "400"
+          # Leave this as-is; free plan works on this host.
+          LLAMA_URL: "https://pro-api.llama.fi/api/summary/derivatives/hyperliquid"
+        run: |
+          python etl/hl_perps_to_dune.py
