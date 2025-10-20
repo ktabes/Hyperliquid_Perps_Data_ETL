@@ -3,7 +3,7 @@ name: HL Perps (history) → Dune (keyless)
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "13 */6 * * *"  # every 6 hours; adjust as you like
+    - cron: "13 */6 * * *"   # every 6 hours; adjust as you like
 
 jobs:
   run:
@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Node + Playwright to click the CSVs
+      # 1) Headless browser to download CSVs (no API key needed)
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -25,15 +25,14 @@ jobs:
       - name: Fetch Hyperliquid CSVs (volume + OI)
         env:
           OUT_DIR: data
-        run: |
-          node scripts/fetch_hl_perps_csvs.mjs
+        run: node scripts/fetch_hl_perps_csvs.mjs
 
-      # Merge + upload to Dune
+      # 2) Merge + upload to Dune
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Run merger/uploader
+      - name: Merge and upload to Dune
         env:
           DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
           DUNE_TABLE_NAME: hyperliquid_perps_daily
@@ -41,6 +40,5 @@ jobs:
           python -m pip install --upgrade pip
           python src/hl_perps_merge_upload.py
 
-      - name: Show sample rows (debug)
-        run: |
-          tail -n 5 data/hyperliquid_perps_daily.csv || true
+      - name: Show last rows (debug)
+        run: tail -n 5 data/hyperliquid_perps_daily.csv || true
