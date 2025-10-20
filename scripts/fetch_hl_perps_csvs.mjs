@@ -7,43 +7,39 @@ const OUT_DIR = process.env.OUT_DIR || 'data';
 const VOLUME_CSV = path.join(OUT_DIR, 'hyperliquid_perps_volume.csv');
 const OI_CSV     = path.join(OUT_DIR, 'hyperliquid_perps_open_interest.csv');
 
-// Pages we’ll visit (public, keyless). We’ll select the protocol and click “Download .csv”.
 const PERPS_PAGE = 'https://defillama.com/perps';
 const OI_PAGE    = 'https://defillama.com/open-interest';
 
-// Utility: download the visible CSV after searching for “Hyperliquid”
-async function downloadCsv(pageUrl, searchBoxSelector, tableRowSelector, csvButtonText, outPath) {
-  const browser = await chromium.launch();
+async function downloadCsvFromPage(pageUrl, outPath, opts = {}) {
+  const { waitAfterLoadMs = 4000, timeoutMs = 90000, headless = true } = opts;
+  const browser = await chromium.launch({ headless });
   const ctx = await browser.newContext({ acceptDownloads: true });
   const page = await ctx.newPage();
-  await page.goto(pageUrl, { waitUntil: 'domcontentloaded' });
 
-  // Ensure page hydrates (UI is a SPA)
-  await page.waitForTimeout(3000);
+  // Go to page and let the SPA hydrate
+  await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+  await page.waitForLoadState('networkidle', { timeout: timeoutMs });
+  await page.waitForTimeout(waitAfterLoadMs);
 
-  // There’s a Search box near the table; type “Hyperliquid”
-  const search = page.getByPlaceholder(/search/i).first().or(page.locator(searchBoxSelector));
-  await search.fill('Hyperliquid');
-  await page.keyboard.press('Enter');
-  await page.waitForTimeout(1000);
-
-  // We should see a filtered row; click to ensure the table is focused (optional).
-  await page.locator(tableRowSelector).first().waitFor({ timeout: 15000 });
-
-  // Ensure Daily granularity if a “D/W/M/C” toggle exists
+  // If a D/W/M/C toggle exists, select Daily (D)
   const dailyBtn = page.getByText(/^D$/).first();
   if (await dailyBtn.count()) {
-    await dailyBtn.click();
+    await dailyBtn.click().catch(() => {});
     await page.waitForTimeout(1000);
   }
 
-  // Click “Download .csv”
+  // Wait for “Download .csv” button (rendered by JS), then click and save the file
+  const dlBtn = page.getByText('Download .csv', { exact: false });
+  await dlBtn.waitFor({ timeout: timeoutMs });
+
   const [download] = await Promise.all([
-    page.waitForEvent('download', { timeout: 60000 }),
-    page.getByText(csvButtonText, { exact: false }).click()
+    page.waitForEvent('download', { timeout: timeoutMs }),
+    dlBtn.click()
   ]);
-  const tmp = await download.path();
-  const buf = await fs.readFile(tmp);
+
+  const tmpPath = await download.path();
+  if (!tmpPath) throw new Error('No download path returned.');
+  const buf = await fs.readFile(tmpPath);
   await fs.mkdir(path.dirname(outPath), { recursive: true });
   await fs.writeFile(outPath, buf);
   console.log(`Saved CSV → ${outPath}`);
@@ -51,22 +47,23 @@ async function downloadCsv(pageUrl, searchBoxSelector, tableRowSelector, csvButt
   await browser.close();
 }
 
-(async () => {
-  // 1) Volume CSV (Perps page)
-  await downloadCsv(
-    PERPS_PAGE,
-    'input[type="search"]',
-    'table tbody tr',
-    'Download .csv',
-    VOLUME_CSV
-  );
+async function withRetry(fn, tries = 3, delayMs = 3000) {
+  let lastErr;
+  for (let i = 1; i <= tries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      lastErr = e;
+      console.warn(`Attempt ${i}/${tries} failed: ${e?.message || e}`);
+      if (i < tries) await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
 
-  // 2) Open Interest CSV (Open Interest page)
-  await downloadCsv(
-    OI_PAGE,
-    'input[type="search"]',
-    'table tbody tr',
-    'Download .csv',
-    OI_CSV
-  );
+(async () => {
+  // 1) Perps (volume CSV)
+  await withRetry(() => downloadCsvFromPage(PERPS_PAGE, VOLUME_CSV));
+
+  // 2) Open Interest CSV
+  await withRetry(() => downloadCsvFromPage(OI_PAGE, OI_CSV));
 })();
