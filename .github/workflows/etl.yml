@@ -1,21 +1,28 @@
+# .github/workflows/etl.yml
 name: HL Perps Snapshot → Dune (keyless)
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "20 * * * *"  # hourly at :20; adjust as you like
+    - cron: "20 * * * *"
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install --upgrade pip requests pandas
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip requests pandas
+
       - name: Run ETL
         env:
           DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
           DUNE_TABLE_NAME: hl_perps_daily
-        run: src/hl_perps_snapshot_to_dune.py
+        run: |
+          python etl/hl_perps_snapshot_to_dune.py   # <— use python + correct path
