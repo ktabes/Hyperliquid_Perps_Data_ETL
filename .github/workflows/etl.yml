@@ -29,4 +29,4 @@ jobs:
           # Leave this as-is; free plan works on this host.
           LLAMA_URL: "https://pro-api.llama.fi/api/summary/derivatives/hyperliquid"
         run: |
-          python etl/hl_perps_to_dune.py
+          python src/hl_perps_to_dune.py
