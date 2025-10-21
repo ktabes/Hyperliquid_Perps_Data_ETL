@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-import os, json, io, csv, sys
+import os, json, io, csv, sys, time
 from datetime import datetime, timezone, date
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 # -------- Config --------
 DUNE_API_KEY   = os.environ["DUNE_API_KEY"]
-DUNE_NAMESPACE = os.environ.get("DUNE_NAMESPACE", "ktabes")  # your namespace
+DUNE_NAMESPACE = os.environ.get("DUNE_NAMESPACE", "ktabes")
 TABLE_NAME     = os.getenv("DUNE_TABLE_NAME", "hyperliquid_perps_daily")
 
 DUNE_CREATE_URL = "https://api.dune.com/api/v1/table/create"
@@ -14,20 +14,23 @@ DUNE_INSERT_URL = f"https://api.dune.com/api/v1/table/{DUNE_NAMESPACE}/{TABLE_NA
 
 HEADERS_JSON = {"Content-Type":"application/json", "X-DUNE-API-KEY": DUNE_API_KEY}
 HEADERS_NDJ  = {"Content-Type":"application/x-ndjson", "X-DUNE-API-KEY": DUNE_API_KEY}
-HEADERS_CSV  = {"Content-Type":"text/csv", "X-DUNE-API-KEY": DUNE_API_KEY}
 
-LLAMA_URL = "https://api.llama.fi/overview/derivatives"
-SLUG      = "hyperliquid"
+# Hyperliquid public API (no key)
+HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
 def log(m): print(f"[hl-perps] {m}")
 
-def http_json(url):
-    req = Request(url, headers={"Accept":"application/json","User-Agent":"hl-perps-snap/1.2"})
-    with urlopen(req, timeout=45) as resp:
+def post_json(url, payload, timeout=45):
+    req = Request(url, data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type":"application/json","Accept":"application/json",
+                           "User-Agent":"ktabes-hl-perps/1.0"},
+                  method="POST")
+    with urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 def dune_post_json(url, payload):
-    req = Request(url, data=json.dumps(payload).encode("utf-8"), headers=HEADERS_JSON, method="POST")
+    req = Request(url, data=json.dumps(payload).encode("utf-8"),
+                  headers=HEADERS_JSON, method="POST")
     try:
         with urlopen(req, timeout=60) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -35,23 +38,23 @@ def dune_post_json(url, payload):
         body = e.read().decode("utf-8","ignore") if e.fp else ""
         sys.exit(f"[create] {e.code} {body}")
 
-def dune_post_bytes(url, body: bytes, headers: dict, label: str):
-    req = Request(url, data=body, headers=headers, method="POST")
+def dune_insert_ndjson(url, rows):
+    body = ("\n".join(json.dumps(r, separators=(",",":")) for r in rows) + "\n").encode("utf-8")
+    req = Request(url, data=body, headers=HEADERS_NDJ, method="POST")
     try:
         with urlopen(req, timeout=60) as resp:
             txt = resp.read().decode("utf-8","ignore")
-            # Insert returns JSON like {"rows_written":1,"bytes_written":...}
             try:
                 j = json.loads(txt)
             except Exception:
                 j = {"raw": txt}
-            log(f"{label} insert response: {j}")
+            log(f"insert response: {j}")
             if isinstance(j, dict) and j.get("rows_written") in (0, None):
-                sys.exit(f"{label} insert wrote 0 rows; response={j}")
+                sys.exit(f"insert wrote 0 rows; response={j}")
             return j
     except HTTPError as e:
         body = e.read().decode("utf-8","ignore") if e.fp else ""
-        sys.exit(f"[insert {label}] {e.code} {body}")
+        sys.exit(f"[insert] {e.code} {body}")
 
 def ensure_table():
     schema = [
@@ -66,7 +69,7 @@ def ensure_table():
     payload = {
         "namespace": DUNE_NAMESPACE,
         "table_name": TABLE_NAME,
-        "description": "Hyperliquid perps daily snapshot (DeFiLlama overview)",
+        "description": "Hyperliquid perps daily snapshot (Hyperliquid info API: sum of assetCtxs)",
         "is_private": False,
         "schema": schema
     }
@@ -79,58 +82,56 @@ def ensure_table():
             raise
         log("table already exists, continuing")
 
+def get_hl_totals():
+    """
+    Call Hyperliquid info API with type=metaAndAssetCtxs, then sum:
+      - open_interest_usd = sum(float(asset.openInterest))
+      - volume24h_usd     = sum(float(asset.dayNtlVlm))
+    The payload returns a two-element array: [meta, assetCtxs[]]
+    """
+    for attempt in range(3):
+        try:
+            resp = post_json(HL_INFO_URL, {"type": "metaAndAssetCtxs"})
+            break
+        except URLError:
+            if attempt == 2: raise
+            time.sleep(2)
+
+    if not isinstance(resp, list) or len(resp) < 2:
+        sys.exit("Unexpected HL response shape.")
+    asset_ctxs = resp[1]
+    oi_total = 0.0
+    vol24_total = 0.0
+    for a in asset_ctxs:
+        # Fields are strings in docs; coerce carefully
+        oi_total   += float(a.get("openInterest", "0") or 0)
+        vol24_total+= float(a.get("dayNtlVlm",   "0") or 0)
+
+    return oi_total, vol24_total
+
 def get_snapshot_row():
-    j = http_json(LLAMA_URL)
-    arr = j.get("protocols") or j.get("data") or []
-    r = next((x for x in arr if isinstance(x, dict) and (x.get("slug")==SLUG or str(x.get("name","")).lower().startswith("hyperliquid"))), None)
-    if not r:
-        sys.exit("Hyperliquid not found in overview/derivatives payload")
-    def f(v): return float(v) if v is not None else 0.0
+    oi, vol24 = get_hl_totals()
+    # We can't get 7d/30d/lifetime directly from HL; leave 0.0 so tiles can still show latest 24h & OI.
     today = date.today().isoformat()
     nowz  = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
     row = {
         "date": today,
-        "volume24h_usd":             f(r.get("volume24h")),
-        "volume7d_usd":              f(r.get("volume7d")),
-        "volume30d_usd":             f(r.get("volume30d")),
-        "open_interest_usd":         f(r.get("openInterest")),
-        "total_volume_lifetime_usd": f(r.get("totalVolume")),
+        "volume24h_usd":             float(vol24),
+        "volume7d_usd":              0.0,
+        "volume30d_usd":             0.0,
+        "open_interest_usd":         float(oi),
+        "total_volume_lifetime_usd": 0.0,
         "as_of_utc": nowz
     }
     log(f"snapshot row: {row}")
     return row
 
-def row_to_ndjson(row: dict) -> bytes:
-    return (json.dumps(row, separators=(",",":")) + "\n").encode("utf-8")
-
-def row_to_csv(row: dict) -> bytes:
-    buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=[
-        "date","volume24h_usd","volume7d_usd","volume30d_usd",
-        "open_interest_usd","total_volume_lifetime_usd","as_of_utc"
-    ])
-    w.writeheader()
-    w.writerow(row)
-    return buf.getvalue().encode("utf-8")
-
 def main():
     log(f"target table: dune.{DUNE_NAMESPACE}.{TABLE_NAME}")
     ensure_table()
     row = get_snapshot_row()
-
-    # Try NDJSON first (most permissive)
-    try:
-        ndj = row_to_ndjson(row)
-        dune_post_bytes(DUNE_INSERT_URL, ndj, HEADERS_NDJ, "NDJSON")
-        log("✅ inserted via NDJSON")
-        return
-    except SystemExit as e:
-        log(f"NDJSON failed: {e}")
-
-    # Fallback to CSV
-    csv_bytes = row_to_csv(row)
-    dune_post_bytes(DUNE_INSERT_URL, csv_bytes, HEADERS_CSV, "CSV")
-    log("✅ inserted via CSV")
+    dune_insert_ndjson(DUNE_INSERT_URL, [row])
+    log("✅ inserted via NDJSON")
 
 if __name__ == "__main__":
     main()
