@@ -1,0 +1,21 @@
+name: HL Perps → Dune (daily snapshots, keyless)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "15 3 * * *"   # daily at 03:15 UTC (change if you like)
+
+jobs:
+  append:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Append snapshot row to Dune
+        env:
+          DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+          DUNE_TABLE_NAME: hyperliquid_perps_daily
+        run: |
+          python src/hl_perps_append_snapshot.py
