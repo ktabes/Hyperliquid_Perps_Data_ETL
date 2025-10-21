@@ -1,17 +1,15 @@
-name: HL Perps (history) → Dune (keyless)
+name: HL Perps → Dune (one-time backfill, keyless)
 
 on:
-  workflow_dispatch: {}
-  schedule:
-    - cron: "13 */6 * * *"   # every 6 hours; adjust as you like
+  workflow_dispatch: {}   # run manually
 
 jobs:
-  run:
+  backfill:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 1) Headless browser to download CSVs (no API key needed)
+      # Fetch CSVs in the runner (no files in repo)
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -22,23 +20,22 @@ jobs:
           npm i playwright@1
           npx playwright install --with-deps chromium
 
-      - name: Fetch Hyperliquid CSVs (volume + OI)
+      - name: Download Hyperliquid CSVs (volume + OI) in /tmp
         env:
-          OUT_DIR: data
+          VOLUME_CSV: /tmp/hyperliquid_perps_volume.csv
+          OI_CSV: /tmp/hyperliquid_perps_open_interest.csv
         run: node scripts/fetch_hl_perps_csvs.mjs
 
-      # 2) Merge + upload to Dune
+      # Merge + upload directly to Dune
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Merge and upload to Dune
+      - name: Backfill to Dune (create+insert)
         env:
           DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
           DUNE_TABLE_NAME: hyperliquid_perps_daily
+          VOLUME_CSV: /tmp/hyperliquid_perps_volume.csv
+          OI_CSV: /tmp/hyperliquid_perps_open_interest.csv
         run: |
-          python -m pip install --upgrade pip
-          python src/hl_perps_merge_upload.py
-
-      - name: Show last rows (debug)
-        run: tail -n 5 data/hyperliquid_perps_daily.csv || true
+          python src/hl_perps_backfill_from_csv_ci.py
